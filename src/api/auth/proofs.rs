@@ -5,12 +5,16 @@ use std::{
     env::VarError::{self, NotPresent},
 };
 
-use anyhow::{Result, anyhow, ensure};
+use {
+    anyhow::{Result, anyhow, ensure},
+    tokio::runtime::Runtime,
+};
 
 use crate::{
     api::{
         auth::{
             authenticate_with_env, authenticate_with_env_from, login, login_with_token,
+            oauth::{code_from_redirect, exchange_code, login_url, validate_token},
             refresh_app_credentials,
         },
         dev_server::{MockServer, make_service_without_auth},
@@ -174,4 +178,127 @@ fn env_wrapper_errors_without_credentials() -> Result<()> {
         }
         Err(_) => Ok(()),
     }
+}
+
+#[test]
+fn login_url_encodes_the_redirect() -> Result<()> {
+    let url = login_url("798273057", "http://localhost:8989");
+    ensure!(
+        url == "https://www.qobuz.com/signin/oauth?ext_app_id=798273057&redirect_url=http%3A%2F%2Flocalhost%3A8989",
+        "unexpected url: {url}"
+    );
+    Ok(())
+}
+
+#[test]
+fn code_from_redirect_prefers_the_french_spelling() -> Result<()> {
+    let code =
+        code_from_redirect("http://localhost:8989/?code=old&code_autorisation=abc%2Fdef&state=1");
+    ensure!(code.as_deref() == Some("abc/def"), "got {code:?}");
+    Ok(())
+}
+
+#[test]
+fn code_from_redirect_accepts_a_bare_path_and_plain_code() -> Result<()> {
+    ensure!(code_from_redirect("/?code=xyz#frag").as_deref() == Some("xyz"));
+    ensure!(code_from_redirect("code=xyz").as_deref() == Some("xyz"));
+    Ok(())
+}
+
+#[test]
+fn code_from_redirect_rejects_a_redirect_without_a_code() -> Result<()> {
+    ensure!(code_from_redirect("http://localhost:8989/?error=denied").is_none());
+    ensure!(code_from_redirect("/?code=").is_none());
+    Ok(())
+}
+
+#[test]
+fn exchange_code_reads_the_grant() -> Result<()> {
+    let body = r#"{"token":"tok","user_id":42}"#;
+    let server = MockServer::start(200, body)?;
+    let service = make_service_without_auth(&server.base_url())?;
+    let rt = Runtime::new()?;
+    let grant = rt.block_on(exchange_code(
+        service.http_client(),
+        service.base_url(),
+        "app",
+        "key",
+        "code",
+    ))?;
+    ensure!(grant.token == "tok");
+    ensure!(grant.user_id == "42");
+    Ok(())
+}
+
+#[test]
+fn exchange_code_reads_a_nested_user() -> Result<()> {
+    let body = r#"{"user_auth_token":"tok","user":{"id":"7"}}"#;
+    let server = MockServer::start(200, body)?;
+    let service = make_service_without_auth(&server.base_url())?;
+    let rt = Runtime::new()?;
+    let grant = rt.block_on(exchange_code(
+        service.http_client(),
+        service.base_url(),
+        "app",
+        "key",
+        "code",
+    ))?;
+    ensure!(grant.user_id == "7");
+    Ok(())
+}
+
+#[test]
+fn exchange_code_fails_without_a_token() -> Result<()> {
+    let server = MockServer::start(200, r#"{"user_id":42}"#)?;
+    let service = make_service_without_auth(&server.base_url())?;
+    let rt = Runtime::new()?;
+    let error = rt
+        .block_on(exchange_code(
+            service.http_client(),
+            service.base_url(),
+            "app",
+            "key",
+            "code",
+        ))
+        .err()
+        .ok_or_else(|| anyhow!("expected an error"))?;
+    ensure!(error.to_string().contains("no token"));
+    Ok(())
+}
+
+#[test]
+fn validate_token_returns_the_login_response() -> Result<()> {
+    let body = r#"{"user":{"id":42,"display_name":"Ada"}}"#;
+    let server = MockServer::start(200, body)?;
+    let service = make_service_without_auth(&server.base_url())?;
+    let rt = Runtime::new()?;
+    let response = rt.block_on(validate_token(
+        service.http_client(),
+        service.base_url(),
+        "tok",
+    ))?;
+    ensure!(
+        response
+            .pointer("/user/display_name")
+            .and_then(|v| v.as_str())
+            == Some("Ada")
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_token_surfaces_a_rejection() -> Result<()> {
+    let body = r#"{"status":"error","code":401,"message":"User authentication is required."}"#;
+    let server = MockServer::start(401, body)?;
+    let service = make_service_without_auth(&server.base_url())?;
+    let rt = Runtime::new()?;
+    ensure!(
+        rt.block_on(validate_token(
+            service.http_client(),
+            service.base_url(),
+            "tok"
+        ))
+        .is_err()
+    );
+    Ok(())
 }

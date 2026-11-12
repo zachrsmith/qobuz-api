@@ -1,5 +1,6 @@
 //! Authentication methods for the Qobuz API.
 
+pub mod oauth;
 #[cfg(test)]
 pub mod proofs;
 

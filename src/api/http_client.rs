@@ -65,6 +65,24 @@ pub trait HttpClient: Send + Sync {
         token: &str,
         range: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<Response, QobuzApiError>> + Send + '_>>;
+
+    /// Sends an authenticated POST request with form parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - Full URL to send the request to
+    /// * `params` - Key-value form parameter pairs
+    /// * `token` - User authentication token sent as `X-User-Auth-Token`
+    ///
+    /// # Returns
+    ///
+    /// The HTTP response.
+    fn post_form_with_auth(
+        &self,
+        url: &str,
+        params: &[(&str, &str)],
+        token: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Response, QobuzApiError>> + Send + '_>>;
 }
 
 /// Production HTTP client wrapping `reqwest::Client`.
@@ -188,6 +206,28 @@ impl HttpClient for ReqwestClient {
         let fut = req.send();
         Box::pin(async move {
             let resp = fut.await?;
+            Ok(resp)
+        })
+    }
+
+    fn post_form_with_auth(
+        &self,
+        url: &str,
+        form: &[(&str, &str)],
+        auth_token: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Response, QobuzApiError>> + Send + '_>> {
+        let params: Vec<(String, String)> = form
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+
+        let fut = self
+            .inner
+            .post(url)
+            .header("X-User-Auth-Token", auth_token)
+            .form(&params);
+        Box::pin(async move {
+            let resp = fut.send().await?;
             Ok(resp)
         })
     }

@@ -8,6 +8,17 @@ use {
 
 use crate::errors::QobuzApiError::{self, CredentialsError};
 
+/// Everything the web player bundle reveals about the application.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebPlayerCredentials {
+    /// Application ID sent with every request.
+    pub app_id: String,
+    /// Application secret used to sign requests.
+    pub app_secret: String,
+    /// Private key for the OAuth code exchange, when the bundle carries one.
+    pub private_key: Option<String>,
+}
+
 /// Extracts `app_id` and `app_secret` from the Qobuz web player JavaScript bundle.
 ///
 /// The `app_id` is extracted as plain text from the production API config.
@@ -25,6 +36,41 @@ use crate::errors::QobuzApiError::{self, CredentialsError};
 /// Returns `QobuzApiError::CredentialsError` if extraction fails or `QobuzApiError::HttpError` on
 /// network failure.
 pub async fn extract_from_web_player() -> Result<(String, String), QobuzApiError> {
+    let credentials = extract_web_player_credentials().await?;
+    Ok((credentials.app_id, credentials.app_secret))
+}
+
+/// Extracts the application ID, secret and OAuth private key from the web player bundle.
+///
+/// # Returns
+///
+/// The credentials found in the bundle; the private key is `None` when the bundle has none.
+///
+/// # Errors
+///
+/// Returns `QobuzApiError::CredentialsError` if the ID or secret cannot be extracted, or
+/// `QobuzApiError::HttpError` on network failure.
+pub async fn extract_web_player_credentials() -> Result<WebPlayerCredentials, QobuzApiError> {
+    let bundle_js = fetch_bundle().await?;
+
+    Ok(WebPlayerCredentials {
+        app_id: extract_app_id_from_bundle(&bundle_js)?,
+        app_secret: extract_app_secret_from_bundle(&bundle_js)?,
+        private_key: extract_private_key_from_bundle(&bundle_js),
+    })
+}
+
+/// Downloads the web player login page and the bundle it references.
+///
+/// # Returns
+///
+/// The JavaScript source of the bundle.
+///
+/// # Errors
+///
+/// Returns `QobuzApiError::CredentialsError` if the login page names no bundle, or
+/// `QobuzApiError::HttpError` on network failure.
+async fn fetch_bundle() -> Result<String, QobuzApiError> {
     let client = Client::builder().user_agent("Mozilla/5.0").build()?;
 
     let login_page = client
@@ -36,12 +82,26 @@ pub async fn extract_from_web_player() -> Result<(String, String), QobuzApiError
 
     let bundle_url = extract_bundle_url(&login_page)?;
 
-    let bundle_js = client.get(bundle_url).send().await?.text().await?;
+    Ok(client.get(bundle_url).send().await?.text().await?)
+}
 
-    let app_id = extract_app_id_from_bundle(&bundle_js)?;
-    let app_secret = extract_app_secret_from_bundle(&bundle_js)?;
-
-    Ok((app_id, app_secret))
+/// Extracts the OAuth private key the web player passes to `/oauth/callback`.
+///
+/// Matches the `privateKey:"..."` literal in the bundle.
+///
+/// # Arguments
+///
+/// * `js` - JavaScript source of the Qobuz web player bundle
+///
+/// # Returns
+///
+/// The private key, or `None` if the bundle carries none.
+#[must_use]
+pub fn extract_private_key_from_bundle(js: &str) -> Option<String> {
+    let re = Regex::new(r#"privateKey:[ \t]*"([A-Za-z0-9+/=_\-]{6,128})""#).ok()?;
+    re.captures(js)
+        .and_then(|caps| caps.get(1))
+        .map(|key| key.as_str().to_string())
 }
 
 /// Extracts the bundle JavaScript URL from the login page HTML.
@@ -221,7 +281,7 @@ mod tests {
 
     use crate::credentials::web::{
         capitalize_first_letter, extract_app_id_from_bundle, extract_app_secret_from_bundle,
-        extract_bundle_url,
+        extract_bundle_url, extract_private_key_from_bundle,
     };
 
     #[test]
@@ -282,6 +342,19 @@ mod tests {
         if extract_app_secret_from_bundle(js).is_ok() {
             bail!("expected error when seed/timezone pattern is missing");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn extract_private_key_from_bundle_finds_the_literal() -> Result<()> {
+        let js = r#"n.authenticate({privateKey:"6lz8C03UDIC7",code:t})"#;
+        ensure!(extract_private_key_from_bundle(js).as_deref() == Some("6lz8C03UDIC7"));
+        Ok(())
+    }
+
+    #[test]
+    fn extract_private_key_from_bundle_is_none_without_one() -> Result<()> {
+        ensure!(extract_private_key_from_bundle("no key here").is_none());
         Ok(())
     }
 

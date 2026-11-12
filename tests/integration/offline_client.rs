@@ -47,6 +47,21 @@ impl HttpClient for StubHttpClient {
         );
         stub_not_configured()
     }
+
+    fn post_form_with_auth(
+        &self,
+        url: &str,
+        params: &[(&str, &str)],
+        token: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Response, QobuzApiError>> + Send + '_>> {
+        info!(
+            url,
+            param_count = params.len(),
+            token_len = token.len(),
+            "stub HTTP client received authenticated form request"
+        );
+        stub_not_configured()
+    }
 }
 
 /// Logs a stub GET/POST request and returns a not-configured error future.

@@ -16,7 +16,12 @@ use {
 };
 
 use crate::{
-    api::{http_client::HttpClient, requests::post, service_state::QobuzApiService},
+    api::{
+        auth::oauth::{Grant, exchange_code, login_url, validate_token},
+        http_client::HttpClient,
+        requests::post,
+        service_state::QobuzApiService,
+    },
     credentials::{save_app_credentials, web::extract_from_web_player},
     errors::QobuzApiError::{self, AuthenticationError, CredentialsError},
     signing::to_hex,
@@ -192,6 +197,61 @@ impl QobuzApiService {
         self.set_auth_token(auth_token.to_string());
         info!(user_id, "Token login successful");
         Ok(())
+    }
+
+    /// Signs in with the authorisation code Qobuz sent to the OAuth redirect.
+    ///
+    /// Exchanges the code at `/oauth/callback`, keeps the granted token on the service and
+    /// confirms it with `user/login`.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The `code_autorisation` (or `code`) query parameter of the redirect
+    /// * `private_key` - The OAuth private key from the web player bundle
+    ///
+    /// # Returns
+    ///
+    /// The granted user id and token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `QobuzApiError` if the exchange or the confirmation fails.
+    pub fn login_with_oauth_code(
+        &mut self,
+        code: &str,
+        private_key: &str,
+    ) -> Result<Grant, QobuzApiError> {
+        let rt = Runtime::new()?;
+        let grant = rt.block_on(exchange_code(
+            self.http_client(),
+            self.base_url(),
+            &self.app_id,
+            private_key,
+            code,
+        ))?;
+        rt.block_on(validate_token(
+            self.http_client(),
+            self.base_url(),
+            &grant.token,
+        ))
+        .map(drop)?;
+        self.set_auth_token(grant.token.clone());
+        info!(user_id = grant.user_id, "OAuth login successful");
+        Ok(grant)
+    }
+
+    /// Builds the URL a browser must open to sign in with this service's application ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `redirect_url` - Where Qobuz sends the browser afterwards, with the code in the query
+    ///
+    /// # Returns
+    ///
+    /// The fully encoded sign-in URL.
+    #[must_use]
+    pub fn oauth_login_url(&self, redirect_url: &str) -> String {
+        login_url(&self.app_id, redirect_url)
     }
 
     /// Re-extracts app credentials from the Qobuz web player.
